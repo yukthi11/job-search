@@ -1,4 +1,3 @@
-# pyrefly: ignore [missing-import]
 from flask import Flask, jsonify, send_from_directory, Response, request
 import pandas as pd
 import os
@@ -6,7 +5,6 @@ import csv
 import json
 import re
 import requests as http_requests
-# pyrefly: ignore [missing-import]
 from bs4 import BeautifulSoup
 from jobspy import scrape_jobs
 
