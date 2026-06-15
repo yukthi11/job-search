@@ -8,3 +8,12 @@
 *.pyc
 .env
 dist
+# Personal Job Data
+applied_jobs.json
+remote_jobs.csv
+
+# Python
+__pycache__/
+*.pyc
+.env
+
