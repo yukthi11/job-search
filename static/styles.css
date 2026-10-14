@@ -139,7 +139,9 @@ h1 {
     font-weight: 500;
 }
 
-.input-group input[type="text"] {
+.input-group input[type="text"],
+.input-group input[type="number"],
+.input-group select {
     background: rgba(0, 0, 0, 0.2);
     border: 1px solid var(--glass-border);
     border-radius: 8px;
@@ -150,7 +152,9 @@ h1 {
     transition: all 0.2s ease;
 }
 
-.input-group input[type="text"]:focus {
+.input-group input[type="text"]:focus,
+.input-group input[type="number"]:focus,
+.input-group select:focus {
     outline: none;
     border-color: var(--accent-color);
 }
@@ -544,4 +548,9 @@ input:checked + .slider:before {
     color: var(--text-secondary);
     font-style: italic;
     font-size: 0.9rem;
+}
+
+.input-group select option {
+    background: #1e293b;
+    color: var(--text-primary);
 }

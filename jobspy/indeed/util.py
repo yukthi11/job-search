@@ -10,7 +10,7 @@ def get_job_type(attributes: list) -> list[JobType]:
     """
     job_types: list[JobType] = []
     for attribute in attributes:
-        job_type_str = attribute["label"].replace("-", "").replace(" ", "").lower()
+        job_type_str = attribute.get("label", "").replace("-", "").replace(" ", "").lower()
         job_type = get_enum_from_job_type(job_type_str)
         if job_type:
             job_types.append(job_type)
@@ -23,12 +23,12 @@ def get_compensation(compensation: dict) -> Compensation | None:
     :param compensation:
     :return: compensation object
     """
-    if not compensation["baseSalary"] and not compensation["estimated"]:
+    if not compensation or (
+        not compensation.get("baseSalary") and not compensation.get("estimated")
+    ):
         return None
-    comp = (
-        compensation["baseSalary"]
-        if compensation["baseSalary"]
-        else compensation["estimated"]["baseSalary"]
+    comp = compensation.get("baseSalary") or compensation["estimated"].get(
+        "baseSalary"
     )
     if not comp:
         return None
@@ -49,35 +49,20 @@ def get_compensation(compensation: dict) -> Compensation | None:
     )
 
 
-def is_job_remote(job: dict, description: str) -> bool:
+REMOTE_KEYWORDS = ("remote", "work from home", "wfh")
+
+
+def _mentions_remote(text: str | None) -> bool:
+    return any(keyword in (text or "").lower() for keyword in REMOTE_KEYWORDS)
+
+
+def is_job_remote(job: dict, description: str | None) -> bool:
     """
     Searches the description, location, and attributes to check if job is remote
     """
-    remote_keywords = ["remote", "work from home", "wfh"]
-    is_remote_in_attributes = any(
-        any(keyword in attr["label"].lower() for keyword in remote_keywords)
-        for attr in job["attributes"]
+    long_location = ((job.get("location") or {}).get("formatted") or {}).get("long")
+    return (
+        any(_mentions_remote(attr.get("label")) for attr in job.get("attributes") or [])
+        or _mentions_remote(description)
+        or _mentions_remote(long_location)
     )
-    is_remote_in_description = any(
-        keyword in description.lower() for keyword in remote_keywords
-    )
-    is_remote_in_location = any(
-        keyword in job["location"]["formatted"]["long"].lower()
-        for keyword in remote_keywords
-    )
-    return is_remote_in_attributes or is_remote_in_description or is_remote_in_location
-
-
-def get_compensation_interval(interval: str) -> CompensationInterval:
-    interval_mapping = {
-        "DAY": "DAILY",
-        "YEAR": "YEARLY",
-        "HOUR": "HOURLY",
-        "WEEK": "WEEKLY",
-        "MONTH": "MONTHLY",
-    }
-    mapped_interval = interval_mapping.get(interval.upper(), None)
-    if mapped_interval and mapped_interval in CompensationInterval.__members__:
-        return CompensationInterval[mapped_interval]
-    else:
-        raise ValueError(f"Unsupported interval: {interval}")

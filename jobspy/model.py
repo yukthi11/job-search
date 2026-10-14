@@ -57,6 +57,15 @@ class JobType(Enum):
     VOLUNTEER = ("volunteer",)
 
 
+class ScraperUnavailableError(ValueError):
+    """Raised when a site does not support the requested country."""
+
+
+def _normalize_country_name(name: str) -> str:
+    """Lower-cases and strips whitespace/dots so "U.K." matches "uk"."""
+    return name.strip().lower().replace(".", "")
+
+
 class Country(Enum):
     """
     Gets the subdomain for Indeed and Glassdoor.
@@ -120,7 +129,7 @@ class Country(Enum):
     SAUDIARABIA = ("saudi arabia", "sa")
     SINGAPORE = ("singapore", "sg", "sg")
     SLOVAKIA = ("slovakia", "sk")
-    SLOVENIA = ("slovenia", "sl")
+    SLOVENIA = ("slovenia", "si")
     SOUTHAFRICA = ("south africa", "za")
     SOUTHKOREA = ("south korea", "kr")
     SPAIN = ("spain", "es", "es")
@@ -159,7 +168,9 @@ class Country(Enum):
             else:
                 return f"www.glassdoor.{self.value[2]}"
         else:
-            raise Exception(f"Glassdoor is not available for {self.name}")
+            raise ScraperUnavailableError(
+                f"Glassdoor is not available for {self.name}"
+            )
 
     def get_glassdoor_url(self):
         return f"https://{self.glassdoor_domain_value}/"
@@ -167,9 +178,11 @@ class Country(Enum):
     @classmethod
     def from_string(cls, country_str: str):
         """Convert a string to the corresponding Country enum."""
-        country_str = country_str.strip().lower()
+        country_str = _normalize_country_name(country_str)
         for country in cls:
-            country_names = country.value[0].split(",")
+            country_names = [
+                _normalize_country_name(name) for name in country.value[0].split(",")
+            ]
             if country_str in country_names:
                 return country
         valid_countries = [country.value for country in cls]
@@ -183,19 +196,31 @@ class Location(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
 
+    def _resolve_country(self) -> Country | str | None:
+        """Maps ISO-style codes (e.g. "GB") to a Country when one matches."""
+        if not isinstance(self.country, str):
+            return self.country
+        code = self.country.strip().lower()
+        for country in Country:
+            indeed_code = country.value[1].partition(":")[0]
+            if code in (indeed_code, country.value[1].rpartition(":")[2]):
+                return country
+        return self.country
+
     def display_location(self) -> str:
         location_parts = []
+        country = self._resolve_country()
         if self.city:
             location_parts.append(self.city)
         if self.state:
             location_parts.append(self.state)
-        if isinstance(self.country, str):
-            location_parts.append(self.country)
-        elif self.country and self.country not in (
+        if isinstance(country, str):
+            location_parts.append(country)
+        elif country and country not in (
             Country.US_CANADA,
             Country.WORLDWIDE,
         ):
-            country_name = self.country.value[0]
+            country_name = country.value[0]
             if "," in country_name:
                 country_name = country_name.split(",")[0]
             if country_name in ("usa", "uk"):
@@ -239,10 +264,10 @@ class DescriptionFormat(Enum):
 class JobPost(BaseModel):
     id: str | None = None
     title: str
-    company_name: str | None
+    company_name: str | None = None
     job_url: str
     job_url_direct: str | None = None
-    location: Optional[Location]
+    location: Optional[Location] = None
 
     description: str | None = None
     company_url: str | None = None
@@ -292,7 +317,11 @@ class Site(Enum):
     GOOGLE = "google"
     BAYT = "bayt"
     NAUKRI = "naukri"
-    BDJOBS = "bdjobs"  # Add this line
+    BDJOBS = "bdjobs"
+    REMOTEOK = "remoteok"
+    REMOTIVE = "remotive"
+    WEWORKREMOTELY = "weworkremotely"
+    HIMALAYAS = "himalayas"
 
 
 class SalarySource(Enum):
@@ -333,3 +362,19 @@ class Scraper(ABC):
 
     @abstractmethod
     def scrape(self, scraper_input: ScraperInput) -> JobResponse: ...
+
+
+SITE_DISPLAY_NAMES = {
+    Site.LINKEDIN: "LinkedIn",
+    Site.INDEED: "Indeed",
+    Site.ZIP_RECRUITER: "ZipRecruiter",
+    Site.GLASSDOOR: "Glassdoor",
+    Site.GOOGLE: "Google",
+    Site.BAYT: "Bayt",
+    Site.NAUKRI: "Naukri",
+    Site.BDJOBS: "BDJobs",
+    Site.REMOTEOK: "RemoteOK",
+    Site.REMOTIVE: "Remotive",
+    Site.WEWORKREMOTELY: "WeWorkRemotely",
+    Site.HIMALAYAS: "Himalayas",
+}

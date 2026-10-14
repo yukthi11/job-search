@@ -49,7 +49,7 @@ class Naukri(Scraper):
         """
         Initializes NaukriScraper with the Naukri API URL
         """
-        super().__init__(Site.NAUKRI, proxies=proxies, ca_cert=ca_cert)
+        super().__init__(Site.NAUKRI, proxies=proxies, ca_cert=ca_cert, user_agent=user_agent)
         self.session = create_session(
             proxies=self.proxies,
             ca_cert=ca_cert,

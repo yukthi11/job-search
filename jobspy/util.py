@@ -7,26 +7,28 @@ from itertools import cycle
 import numpy as np
 import requests
 import tls_client
-import urllib3
 from markdownify import markdownify as md
 from requests.adapters import HTTPAdapter, Retry
 
 from jobspy.model import CompensationInterval, JobType, Site
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+_log_level = logging.INFO
 
 
 def create_logger(name: str):
     logger = logging.getLogger(f"JobSpy:{name}")
     logger.propagate = False
     if not logger.handlers:
-        logger.setLevel(logging.INFO)
+        logger.setLevel(_log_level)
         console_handler = logging.StreamHandler()
         format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
         formatter = logging.Formatter(format)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
     return logger
+
+
+PROXY_SCHEMES = ("http://", "https://", "socks4://", "socks5://")
 
 
 class RotatingProxySession:
@@ -45,9 +47,7 @@ class RotatingProxySession:
     @staticmethod
     def format_proxy(proxy):
         """Utility method to format a proxy string into a dictionary."""
-        if proxy.startswith("http://") or proxy.startswith("https://"):
-            return {"http": proxy, "https": proxy}
-        if proxy.startswith("socks5://"):
+        if proxy.startswith(PROXY_SCHEMES):
             return {"http": proxy, "https": proxy}
         return {"http": f"http://{proxy}", "https": f"http://{proxy}"}
 
@@ -132,23 +132,22 @@ def create_session(
     return session
 
 
-def set_logger_level(verbose: int):
+def set_logger_level(verbose: int | None):
     """
-    Adjusts the logger's level. This function allows the logging level to be changed at runtime.
+    Adjusts the log level of all JobSpy loggers, including ones created later.
 
-    Parameters:
-    - verbose: int {0, 1, 2} (default=2, all logs)
+    :param verbose: 0 -> ERROR, 1 -> WARNING, 2 -> INFO (anything else -> INFO).
+        None leaves the current level untouched.
     """
+    global _log_level
     if verbose is None:
         return
-    level_name = {2: "INFO", 1: "WARNING", 0: "ERROR"}.get(verbose, "INFO")
-    level = getattr(logging, level_name.upper(), None)
-    if level is not None:
-        for logger_name in logging.root.manager.loggerDict:
-            if logger_name.startswith("JobSpy:"):
-                logging.getLogger(logger_name).setLevel(level)
-    else:
-        raise ValueError(f"Invalid log level: {level_name}")
+    _log_level = {2: logging.INFO, 1: logging.WARNING, 0: logging.ERROR}.get(
+        verbose, logging.INFO
+    )
+    for logger_name in logging.root.manager.loggerDict:
+        if logger_name.startswith("JobSpy:"):
+            logging.getLogger(logger_name).setLevel(_log_level)
 
 
 def markdown_converter(description_html: str):
@@ -178,34 +177,44 @@ def get_enum_from_job_type(job_type_str: str) -> JobType | None:
     """
     Given a string, returns the corresponding JobType enum member if a match is found.
     """
-    res = None
     for job_type in JobType:
         if job_type_str in job_type.value:
-            res = job_type
-    return res
+            return job_type
+    return None
 
 
-def currency_parser(cur_str):
-    # Remove any non-numerical characters
-    # except for ',' '.' or '-' (e.g. EUR)
-    cur_str = re.sub("[^-0-9.,]", "", cur_str)
-    # Remove any 000s separators (either , or .)
-    cur_str = re.sub("[.,]", "", cur_str[:-3]) + cur_str[-3:]
-
-    if "." in list(cur_str[-3:]):
-        num = float(cur_str)
-    elif "," in list(cur_str[-3:]):
-        num = float(cur_str.replace(",", "."))
-    else:
-        num = float(cur_str)
-
-    return np.round(num, 2)
+def currency_parser(cur_str: str) -> float | None:
+    """
+    Parses a price such as "$1,234.50" or "1.234,50 EUR" into a float.
+    Returns None when the string holds no parsable number.
+    """
+    cleaned = re.sub(r"[^-0-9.,]", "", cur_str or "")
+    if not any(char.isdigit() for char in cleaned):
+        return None
+    # A separator followed by 1-2 digits at the end is the decimal mark;
+    # every other "." or "," is a thousands separator.
+    match = re.fullmatch(r"(-?[\d.,]*?)(?:[.,](\d{1,2}))?", cleaned)
+    integer_part, decimals = match.group(1), match.group(2)
+    integer_part = re.sub(r"[.,]", "", integer_part)
+    try:
+        return float(np.round(float(f"{integer_part or 0}.{decimals or 0}"), 2))
+    except ValueError:
+        return None
 
 
 def remove_attributes(tag):
     for attr in list(tag.attrs):
         del tag[attr]
     return tag
+
+
+CURRENCY_SYMBOLS = {"$": "USD", "£": "GBP", "€": "EUR"}
+HOURS_PER_YEAR = 2080
+MONTHS_PER_YEAR = 12
+_SALARY_PATTERN = re.compile(
+    r"([$£€])(\d+(?:,\d+)*(?:\.\d+)?)\s*([kK]?)\s*[-—–]\s*(?:[$£€])?"
+    r"(\d+(?:,\d+)*(?:\.\d+)?)\s*([kK]?)"
+)
 
 
 def extract_salary(
@@ -217,65 +226,48 @@ def extract_salary(
     enforce_annual_salary=False,
 ):
     """
-    Extracts salary information from a string and returns the salary interval, min and max salary values, and currency.
-    (TODO: Needs test cases as the regex is complicated and may not cover all edge cases)
+    Extracts a salary range such as "$50k - $60k" from free text.
+
+    :return: (interval, min_amount, max_amount, currency); all None when no
+        plausible range is found. A "k" suffix on either number scales both,
+        as in "$50 - $60k".
     """
+    no_salary = (None, None, None, None)
     if not salary_str:
-        return None, None, None, None
+        return no_salary
 
-    annual_max_salary = None
-    min_max_pattern = r"\$(\d+(?:,\d+)?(?:\.\d+)?)([kK]?)\s*[-—–]\s*(?:\$)?(\d+(?:,\d+)?(?:\.\d+)?)([kK]?)"
+    match = _SALARY_PATTERN.search(salary_str)
+    if not match:
+        return no_salary
 
-    def to_int(s):
-        return int(float(s.replace(",", "")))
+    symbol, min_text, min_k, max_text, max_k = match.groups()
+    multiplier = 1000 if (min_k or max_k) else 1
+    min_salary = float(min_text.replace(",", "")) * multiplier
+    max_salary = float(max_text.replace(",", "")) * multiplier
 
-    def convert_hourly_to_annual(hourly_wage):
-        return hourly_wage * 2080
+    if min_salary < hourly_threshold:
+        interval, to_annual = CompensationInterval.HOURLY.value, HOURS_PER_YEAR
+        fits_interval = max_salary < hourly_threshold
+    elif min_salary < monthly_threshold:
+        interval, to_annual = CompensationInterval.MONTHLY.value, MONTHS_PER_YEAR
+        fits_interval = max_salary < monthly_threshold
+    else:
+        interval, to_annual = CompensationInterval.YEARLY.value, 1
+        fits_interval = True
 
-    def convert_monthly_to_annual(monthly_wage):
-        return monthly_wage * 12
+    annual_min, annual_max = min_salary * to_annual, max_salary * to_annual
+    if not (
+        fits_interval
+        and lower_limit <= annual_min <= upper_limit
+        and lower_limit <= annual_max <= upper_limit
+        and annual_min < annual_max
+    ):
+        return no_salary
 
-    match = re.search(min_max_pattern, salary_str)
-
-    if match:
-        min_salary = to_int(match.group(1))
-        max_salary = to_int(match.group(3))
-        # Handle 'k' suffix for min and max salaries independently
-        if "k" in match.group(2).lower() or "k" in match.group(4).lower():
-            min_salary *= 1000
-            max_salary *= 1000
-
-        # Convert to annual if less than the hourly threshold
-        if min_salary < hourly_threshold:
-            interval = CompensationInterval.HOURLY.value
-            annual_min_salary = convert_hourly_to_annual(min_salary)
-            if max_salary < hourly_threshold:
-                annual_max_salary = convert_hourly_to_annual(max_salary)
-
-        elif min_salary < monthly_threshold:
-            interval = CompensationInterval.MONTHLY.value
-            annual_min_salary = convert_monthly_to_annual(min_salary)
-            if max_salary < monthly_threshold:
-                annual_max_salary = convert_monthly_to_annual(max_salary)
-
-        else:
-            interval = CompensationInterval.YEARLY.value
-            annual_min_salary = min_salary
-            annual_max_salary = max_salary
-
-        # Ensure salary range is within specified limits
-        if not annual_max_salary:
-            return None, None, None, None
-        if (
-            lower_limit <= annual_min_salary <= upper_limit
-            and lower_limit <= annual_max_salary <= upper_limit
-            and annual_min_salary < annual_max_salary
-        ):
-            if enforce_annual_salary:
-                return interval, annual_min_salary, annual_max_salary, "USD"
-            else:
-                return interval, min_salary, max_salary, "USD"
-    return None, None, None, None
+    currency = CURRENCY_SYMBOLS[symbol]
+    if enforce_annual_salary:
+        return interval, annual_min, annual_max, currency
+    return interval, min_salary, max_salary, currency
 
 
 def extract_job_type(description: str):
@@ -298,29 +290,27 @@ def extract_job_type(description: str):
 
 
 def map_str_to_site(site_name: str) -> Site:
-    return Site[site_name.upper()]
+    try:
+        return Site[site_name.strip().upper()]
+    except KeyError:
+        valid = ", ".join(site.value for site in Site)
+        raise ValueError(f"Unknown site '{site_name}'. Valid sites: {valid}") from None
 
 
-def get_enum_from_value(value_str):
-    for job_type in JobType:
-        if value_str in job_type.value:
-            return job_type
-    raise Exception(f"Invalid job type: {value_str}")
+def get_enum_from_value(value_str: str) -> JobType:
+    job_type = get_enum_from_job_type(value_str)
+    if job_type is None:
+        raise ValueError(f"Invalid job type: {value_str}")
+    return job_type
+
+
+ANNUAL_MULTIPLIERS = {"hourly": 2080, "monthly": 12, "weekly": 52, "daily": 260}
 
 
 def convert_to_annual(job_data: dict):
-    if job_data["interval"] == "hourly":
-        job_data["min_amount"] *= 2080
-        job_data["max_amount"] *= 2080
-    if job_data["interval"] == "monthly":
-        job_data["min_amount"] *= 12
-        job_data["max_amount"] *= 12
-    if job_data["interval"] == "weekly":
-        job_data["min_amount"] *= 52
-        job_data["max_amount"] *= 52
-    if job_data["interval"] == "daily":
-        job_data["min_amount"] *= 260
-        job_data["max_amount"] *= 260
+    multiplier = ANNUAL_MULTIPLIERS.get(job_data["interval"], 1)
+    job_data["min_amount"] *= multiplier
+    job_data["max_amount"] *= multiplier
     job_data["interval"] = "yearly"
 
 
@@ -340,6 +330,7 @@ desired_order = [
     "max_amount",
     "currency",
     "is_remote",
+    "remote_type",
     "job_level",
     "job_function",
     "listing_type",

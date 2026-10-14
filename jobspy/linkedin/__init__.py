@@ -11,7 +11,6 @@ import regex as re
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from jobspy.exception import LinkedInException
 from jobspy.linkedin.constant import headers
 from jobspy.linkedin.util import (
     is_job_remote,
@@ -49,6 +48,7 @@ class LinkedIn(Scraper):
     delay = 3
     band_delay = 4
     jobs_per_page = 25
+    max_start = 1000
 
     def __init__(
         self, proxies: list[str] | str | None = None, ca_cert: str | None = None, user_agent: str | None = None
@@ -56,7 +56,9 @@ class LinkedIn(Scraper):
         """
         Initializes LinkedInScraper with the LinkedIn job search url
         """
-        super().__init__(Site.LINKEDIN, proxies=proxies, ca_cert=ca_cert)
+        super().__init__(
+            Site.LINKEDIN, proxies=proxies, ca_cert=ca_cert, user_agent=user_agent
+        )
         self.session = create_session(
             proxies=self.proxies,
             ca_cert=ca_cert,
@@ -66,6 +68,8 @@ class LinkedIn(Scraper):
             clear_cookies=True,
         )
         self.session.headers.update(headers)
+        if self.user_agent:
+            self.session.headers["user-agent"] = self.user_agent
         self.scraper_input = None
         self.country = "worldwide"
         self.job_url_direct_regex = re.compile(r'(?<=\?url=)[^"]+')
@@ -79,18 +83,18 @@ class LinkedIn(Scraper):
         self.scraper_input = scraper_input
         job_list: list[JobPost] = []
         seen_ids = set()
-        start = scraper_input.offset // 10 * 10 if scraper_input.offset else 0
+        start = scraper_input.offset or 0
         request_count = 0
         seconds_old = (
             scraper_input.hours_old * 3600 if scraper_input.hours_old else None
         )
         continue_search = (
-            lambda: len(job_list) < scraper_input.results_wanted and start < 1000
+            lambda: len(job_list) < scraper_input.results_wanted and start < self.max_start
         )
         while continue_search():
             request_count += 1
             log.info(
-                f"search page: {request_count} / {math.ceil(scraper_input.results_wanted / 10)}"
+                f"search page: {request_count} / {math.ceil(scraper_input.results_wanted / self.jobs_per_page)}"
             )
             params = {
                 "keywords": scraper_input.search_term,
@@ -156,12 +160,13 @@ class LinkedIn(Scraper):
                     try:
                         fetch_desc = scraper_input.linkedin_fetch_description
                         job_post = self._process_job(job_card, job_id, fetch_desc)
-                        if job_post:
-                            job_list.append(job_post)
-                        if not continue_search():
-                            break
                     except Exception as e:
-                        raise LinkedInException(str(e))
+                        log.warning(f"LinkedIn: skipping job {job_id}: {e}")
+                        continue
+                    if job_post:
+                        job_list.append(job_post)
+                    if not continue_search():
+                        break
 
             if continue_search():
                 time.sleep(random.uniform(self.delay, self.delay + self.band_delay))
@@ -175,19 +180,12 @@ class LinkedIn(Scraper):
     ) -> Optional[JobPost]:
         salary_tag = job_card.find("span", class_="job-search-card__salary-info")
 
-        compensation = description = None
-        if salary_tag:
-            salary_text = salary_tag.get_text(separator=" ").strip()
-            salary_values = [currency_parser(value) for value in salary_text.split("-")]
-            salary_min = salary_values[0]
-            salary_max = salary_values[1]
-            currency = salary_text[0] if salary_text[0] != "$" else "USD"
-
-            compensation = Compensation(
-                min_amount=int(salary_min),
-                max_amount=int(salary_max),
-                currency=currency,
-            )
+        description = None
+        compensation = (
+            self._parse_compensation(salary_tag.get_text(separator=" ").strip())
+            if salary_tag
+            else None
+        )
 
         title_tag = job_card.find("span", class_="sr-only")
         title = title_tag.get_text(strip=True) if title_tag else "N/A"
@@ -244,6 +242,20 @@ class LinkedIn(Scraper):
             emails=extract_emails_from_text(description),
             company_logo=job_details.get("company_logo"),
             job_function=job_details.get("job_function"),
+        )
+
+    @staticmethod
+    def _parse_compensation(salary_text: str) -> Optional[Compensation]:
+        """Parses "$80K/yr - $100K/yr" style text; None if it is unparsable."""
+        amounts = [currency_parser(value) for value in salary_text.split("-")]
+        amounts = [amount for amount in amounts if amount is not None]
+        if not amounts:
+            return None
+        symbol = salary_text.lstrip()[:1]
+        return Compensation(
+            min_amount=int(amounts[0]),
+            max_amount=int(amounts[-1]),
+            currency="USD" if symbol == "$" else symbol,
         )
 
     def _get_job_details(self, job_id: str) -> dict:
@@ -313,18 +325,18 @@ class LinkedIn(Scraper):
                 "span", class_="job-search-card__location"
             )
             location_string = location_tag.text.strip() if location_tag else "N/A"
-            parts = location_string.split(", ")
+            parts = [part.strip() for part in location_string.split(",")]
+            default_country = location.country
             if len(parts) == 2:
-                city, state = parts
                 location = Location(
-                    city=city,
-                    state=state,
-                    country=Country.from_string(self.country),
+                    city=parts[0], state=parts[1], country=default_country
                 )
-            elif len(parts) == 3:
-                city, state, country = parts
-                country = Country.from_string(country)
-                location = Location(city=city, state=state, country=country)
+            elif len(parts) >= 3:
+                try:
+                    country = Country.from_string(parts[-1])
+                except ValueError:
+                    country = parts[-1]
+                location = Location(city=parts[0], state=parts[1], country=country)
         return location
 
     def _parse_job_url_direct(self, soup: BeautifulSoup) -> str | None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Tuple
 
 from jobspy.indeed.constant import job_search_query, api_headers
@@ -26,6 +26,11 @@ from jobspy.util import (
 log = create_logger("Indeed")
 
 
+def _gql_escape(value: str | None) -> str:
+    """Escapes a value for use inside a double-quoted GraphQL string."""
+    return (value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
 class Indeed(Scraper):
     def __init__(
         self, proxies: list[str] | str | None = None, ca_cert: str | None = None, user_agent: str | None = None
@@ -33,7 +38,9 @@ class Indeed(Scraper):
         """
         Initializes IndeedScraper with the Indeed API url
         """
-        super().__init__(Site.INDEED, proxies=proxies)
+        super().__init__(
+            Site.INDEED, proxies=proxies, ca_cert=ca_cert, user_agent=user_agent
+        )
 
         self.session = create_session(
             proxies=self.proxies, ca_cert=ca_cert, is_tls=False
@@ -73,6 +80,10 @@ class Indeed(Scraper):
                 break
             job_list += jobs
             page += 1
+            if not cursor:
+                break
+        if scraper_input.hours_old and scraper_input.is_remote:
+            job_list = self._drop_older_than(job_list, scraper_input.hours_old)
         return JobResponse(
             jobs=job_list[
                 scraper_input.offset : scraper_input.offset
@@ -89,50 +100,59 @@ class Indeed(Scraper):
         jobs = []
         new_cursor = None
         filters = self._build_filters()
-        search_term = (
-            self.scraper_input.search_term.replace('"', '\\"')
-            if self.scraper_input.search_term
-            else ""
-        )
+        search_term = _gql_escape(self.scraper_input.search_term)
+        where = _gql_escape(self.scraper_input.location)
         query = job_search_query.format(
             what=(f'what: "{search_term}"' if search_term else ""),
             location=(
-                f'location: {{where: "{self.scraper_input.location}", radius: {self.scraper_input.distance}, radiusUnit: MILES}}'
+                f'location: {{where: "{where}", radius: {self.scraper_input.distance}, radiusUnit: MILES}}'
                 if self.scraper_input.location
                 else ""
             ),
             dateOnIndeed=self.scraper_input.hours_old,
-            cursor=f'cursor: "{cursor}"' if cursor else "",
+            cursor=f'cursor: "{_gql_escape(cursor)}"' if cursor else "",
             filters=filters,
         )
         payload = {
             "query": query,
         }
-        api_headers_temp = api_headers.copy()
-        api_headers_temp["indeed-co"] = self.api_country_code
+        request_headers = api_headers.copy()
+        request_headers["indeed-co"] = self.api_country_code
+        if self.user_agent:
+            request_headers["user-agent"] = self.user_agent
         response = self.session.post(
             self.api_url,
-            headers=api_headers_temp,
+            headers=request_headers,
             json=payload,
             timeout=10,
-            verify=False,
+            verify=self.ca_cert or True,
         )
         if not response.ok:
             log.info(
                 f"responded with status code: {response.status_code} (submit GitHub issue if this appears to be a bug)"
             )
             return jobs, new_cursor
-        data = response.json()
-        jobs = data["data"]["jobSearch"]["results"]
-        new_cursor = data["data"]["jobSearch"]["pageInfo"]["nextCursor"]
+        job_search = (response.json().get("data") or {}).get("jobSearch") or {}
+        jobs = job_search.get("results") or []
+        new_cursor = (job_search.get("pageInfo") or {}).get("nextCursor")
 
         job_list = []
         for job in jobs:
-            processed_job = self._process_job(job["job"])
+            try:
+                processed_job = self._process_job(job["job"])
+            except (KeyError, TypeError, ValueError) as e:
+                log.warning(f"skipping malformed job: {e!r}")
+                continue
             if processed_job:
                 job_list.append(processed_job)
 
         return job_list, new_cursor
+
+    @staticmethod
+    def _drop_older_than(jobs: list[JobPost], hours_old: int) -> list[JobPost]:
+        """Applies hours_old locally; dates only have day resolution, so the cutoff rounds up."""
+        oldest = datetime.now().date() - timedelta(days=-(-hours_old // 24))
+        return [job for job in jobs if not job.date_posted or job.date_posted >= oldest]
 
     def _build_filters(self):
         """
@@ -140,7 +160,12 @@ class Indeed(Scraper):
         IndeedApply: filters: { keyword: { field: "indeedApplyScope", keys: ["DESKTOP"] } }
         """
         filters_str = ""
-        if self.scraper_input.hours_old:
+        # Indeed cannot combine its date filter with attribute filters. Remote
+        # is the one that matters, so it wins and hours_old is applied locally.
+        use_date_filter = self.scraper_input.hours_old and not self.scraper_input.is_remote
+        if self.scraper_input.hours_old and self.scraper_input.job_type and not self.scraper_input.is_remote:
+            log.warning("Indeed cannot combine hours_old with job_type; job_type is ignored")
+        if use_date_filter:
             filters_str = """
             filters: {{
                 date: {{
@@ -202,32 +227,38 @@ class Indeed(Scraper):
         if job_url in self.seen_urls:
             return
         self.seen_urls.add(job_url)
-        description = job["description"]["html"]
+        description = (job.get("description") or {}).get("html")
         if self.scraper_input.description_format == DescriptionFormat.MARKDOWN:
             description = markdown_converter(description)
 
-        job_type = get_job_type(job["attributes"])
-        timestamp_seconds = job["datePublished"] / 1000
-        date_posted = datetime.fromtimestamp(timestamp_seconds).strftime("%Y-%m-%d")
-        employer = job["employer"].get("dossier") if job["employer"] else None
+        job_type = get_job_type(job.get("attributes") or [])
+        published_ms = job.get("datePublished")
+        date_posted = (
+            datetime.fromtimestamp(published_ms / 1000).strftime("%Y-%m-%d")
+            if published_ms
+            else None
+        )
+        employer_info = job.get("employer") or {}
+        employer = employer_info.get("dossier")
         employer_details = employer.get("employerDetails", {}) if employer else {}
-        rel_url = job["employer"]["relativeCompanyPageUrl"] if job["employer"] else None
+        rel_url = employer_info.get("relativeCompanyPageUrl")
+        location = job.get("location") or {}
         return JobPost(
             id=f'in-{job["key"]}',
             title=job["title"],
             description=description,
-            company_name=job["employer"].get("name") if job.get("employer") else None,
-            company_url=(f"{self.base_url}{rel_url}" if job["employer"] else None),
-            company_url_direct=(
-                employer["links"]["corporateWebsite"] if employer else None
+            company_name=employer_info.get("name"),
+            company_url=f"{self.base_url}{rel_url}" if rel_url else None,
+            company_url_direct=((employer or {}).get("links") or {}).get(
+                "corporateWebsite"
             ),
             location=Location(
-                city=job.get("location", {}).get("city"),
-                state=job.get("location", {}).get("admin1Code"),
-                country=job.get("location", {}).get("countryCode"),
+                city=location.get("city"),
+                state=location.get("admin1Code"),
+                country=location.get("countryCode"),
             ),
             job_type=job_type,
-            compensation=get_compensation(job["compensation"]),
+            compensation=get_compensation(job.get("compensation")),
             date_posted=date_posted,
             job_url=job_url,
             job_url_direct=(

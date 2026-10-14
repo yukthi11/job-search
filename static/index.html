@@ -26,16 +26,38 @@
                     <input type="text" id="filter-term" value="software engineer" placeholder="e.g. Data Scientist">
                 </div>
                 <div class="input-group">
-                    <label>Location</label>
-                    <input type="text" id="filter-location" value="UK" placeholder="e.g. London">
+                    <label>Country</label>
+                    <select id="filter-country">
+                        <option value="UK" selected>United Kingdom</option>
+                        <option value="India">India</option>
+                        <option value="Ireland">Ireland</option>
+                        <option value="USA">United States</option>
+                        <option value="Canada">Canada</option>
+                        <option value="Germany">Germany</option>
+                        <option value="Netherlands">Netherlands</option>
+                        <option value="Australia">Australia</option>
+                    </select>
                 </div>
                 <div class="input-group">
-                    <label>Country (Indeed/Glassdoor)</label>
-                    <input type="text" id="filter-country" value="UK" placeholder="e.g. UK">
+                    <label>City / Region (optional)</label>
+                    <input type="text" id="filter-location" value="" placeholder="e.g. London - leave empty for the whole country">
+                </div>
+                <div class="input-group">
+                    <label>Posted Within</label>
+                    <select id="filter-hours">
+                        <option value="24">Last 24 hours</option>
+                        <option value="72">Last 3 days</option>
+                        <option value="168" selected>Last 7 days</option>
+                        <option value="720">Last 30 days</option>
+                    </select>
                 </div>
                 <div class="input-group">
                     <label>Results per Site</label>
                     <input type="number" id="filter-results" value="10" min="1" max="1000" style="background: rgba(0, 0, 0, 0.2); border: 1px solid var(--glass-border); border-radius: 8px; padding: 0.75rem 1rem; color: var(--text-primary); font-family: 'Outfit', sans-serif; font-size: 0.95rem;">
+                </div>
+                <div class="input-group">
+                    <label title="Hides jobs that ask for more years than this. Leave empty to show everything.">My Years of Experience</label>
+                    <input type="number" id="filter-experience" min="0" max="40" step="1" placeholder="e.g. 2 - empty shows all">
                 </div>
                 <div class="input-group checkbox-group">
                     <label class="toggle">
@@ -43,6 +65,20 @@
                         <span class="slider"></span>
                     </label>
                     <span>Remote Only</span>
+                </div>
+                <div class="input-group checkbox-group">
+                    <label class="toggle">
+                        <input type="checkbox" id="filter-worldwide" checked>
+                        <span class="slider"></span>
+                    </label>
+                    <span title="Searches only remote job boards and hides jobs tied to one country. Turn off to search a specific country on LinkedIn/Indeed/Glassdoor.">Worldwide remote only</span>
+                </div>
+                <div class="input-group checkbox-group">
+                    <label class="toggle">
+                        <input type="checkbox" id="filter-open-hiring" checked>
+                        <span class="slider"></span>
+                    </label>
+                    <span title="Hides jobs whose description says you must be based in, or have the right to work in, a specific country">Hide location-restricted jobs</span>
                 </div>
             </section>
         </header>

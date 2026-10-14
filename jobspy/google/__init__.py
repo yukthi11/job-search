@@ -28,7 +28,7 @@ class Google(Scraper):
         Initializes Google Scraper with the Goodle jobs search url
         """
         site = Site(Site.GOOGLE)
-        super().__init__(site, proxies=proxies, ca_cert=ca_cert)
+        super().__init__(site, proxies=proxies, ca_cert=ca_cert, user_agent=user_agent)
 
         self.country = None
         self.session = None

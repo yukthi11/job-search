@@ -51,7 +51,7 @@ class BDJobs(Scraper):
         """
         Initializes BDJobsScraper with the BDJobs job search url
         """
-        super().__init__(Site.BDJOBS, proxies=proxies, ca_cert=ca_cert)
+        super().__init__(Site.BDJOBS, proxies=proxies, ca_cert=ca_cert, user_agent=user_agent)
         self.session = create_session(
             proxies=self.proxies,
             ca_cert=ca_cert,

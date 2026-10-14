@@ -19,7 +19,7 @@ git clone <your-repo-url>
 cd JobSpy
 ```
 
-2. Install the required Python dependencies:
+2. Install the required Python dependencies (Python 3.10+):
 ```bash
 pip install -r requirements.txt
 ```

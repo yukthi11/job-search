@@ -43,7 +43,7 @@ class ZipRecruiter(Scraper):
         """
         Initializes ZipRecruiterScraper with the ZipRecruiter job search url
         """
-        super().__init__(Site.ZIP_RECRUITER, proxies=proxies)
+        super().__init__(Site.ZIP_RECRUITER, proxies=proxies, ca_cert=ca_cert, user_agent=user_agent)
 
         self.scraper_input = None
         self.session = create_session(proxies=proxies, ca_cert=ca_cert)
